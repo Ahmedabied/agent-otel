@@ -12,10 +12,14 @@
       "default": "./dist/src/index.js"
     }
   },
-  "files": ["dist/src"],
-  "engines": { "node": ">=22.18" },
+  "files": [
+    "dist/src"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
   "scripts": {
-    "compile": "tsc -p tsconfig.json",
+    "compile": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test \"test/*.test.ts\""
   },
@@ -25,6 +29,8 @@
   "devDependencies": {
     "@opentelemetry/api": "^1.10.0",
     "@opentelemetry/context-async-hooks": "^3.1.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.301.0",
+    "@opentelemetry/resources": "^3.1.0",
     "@opentelemetry/sdk-trace": "^3.1.0",
     "@types/node": "^22.20.5",
     "typescript": "^7.0.2"

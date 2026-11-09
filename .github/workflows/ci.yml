@@ -77,3 +77,11 @@ jobs:
           nohup "./jaeger-$JAEGER_VERSION-linux-amd64/jaeger" > jaeger.log 2>&1 &
           for i in $(seq 1 30); do curl -sf http://localhost:16686/ > /dev/null && break; sleep 1; done
       - run: python examples/otlp_jaeger.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: The TypeScript side, same checks
+        working-directory: js
+        run: |
+          npm ci
+          node examples/otlp-jaeger.ts

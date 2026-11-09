@@ -156,6 +156,11 @@ no OpenTelemetry context manager registered, spans still nest under their agent;
 it), they join the application's own traces. It is not on npm (that needs an account): build it from the clone with
 `cd js && npm ci && npm run compile` and install that folder.
 
+Over OTLP it needs nothing of its own either: `node js/examples/otlp-jaeger.ts` sends the same pretend support agent
+to Jaeger with the stock exporter, reads both runs back from Jaeger's API and makes the same checks as the Python
+example. CI runs it against the real Jaeger after the Python one: 2 traces, 11 spans, token counts stored as
+integers, the failed carrier call marked with its error type.
+
 ## Limits
 
 - **You wrap the calls.** There is no automatic patching of model SDKs; two lines per call site, or `@ao.tool()`.
@@ -173,7 +178,9 @@ it), they join the application's own traces. It is not on npm (that needs an acc
 ```sh
 pip install -e '.[test]'
 pytest -q               # 29 tests, about 1 s
-cd js && npm ci && npm test    # 7 tests; AGENT_OTEL_PYTHON=../.venv/bin/python also checks the Python CLI reads them
+cd js && npm ci
+npm run typecheck       # src, tests, bench and examples
+npm test                # 7 tests; with AGENT_OTEL_PYTHON=../.venv/bin/python the Python CLI reads their output too
 ```
 
 Tests use the SDK's in-memory exporter and a fake model. CI also runs the demo, the viewer and a short benchmark.
