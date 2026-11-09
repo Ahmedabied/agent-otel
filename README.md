@@ -47,9 +47,9 @@ written to the provider's prompt cache. Some APIs report input without the cache
 
 ```python
 u = reply.usage
-m.record(input_tokens=u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens,
-         output_tokens=u.output_tokens, cache_read_input_tokens=u.cache_read_input_tokens,
-         cache_write_input_tokens=u.cache_creation_input_tokens)
+read, write = u.cache_read_input_tokens or 0, u.cache_creation_input_tokens or 0
+m.record(input_tokens=u.input_tokens + read + write, output_tokens=u.output_tokens,
+         cache_read_input_tokens=read, cache_write_input_tokens=write)
 ```
 
 If the cache counts are bigger than `input_tokens`, they cannot be part of it: agent-otel adds them and warns, so
