@@ -136,14 +136,16 @@ milliseconds, 30 microseconds does not show.
   thread pool, submit with `contextvars.copy_context().run`.
 - **The GenAI conventions are still in development.** Names may change again; agent-otel will follow.
 - **Content is off by default.** With `capture_content=True`, tool arguments and results are stored (capped at
-  4,000 characters) and may contain personal data.
+  4,000 characters) and may contain personal data. A big result is cut while it is encoded, not after: a tool
+  returning 10,000 documents costs 32 us to record instead of 4.8 ms, a million numbers 126 us instead of 29 ms
+  (Python 3.13). The same text on every Python from 3.10.
 - **The viewer is a static file** for looking at local runs, not a tracing backend.
 
 ## Development
 
 ```sh
 pip install -e '.[test]'
-pytest -q               # 27 tests, about 1 s
+pytest -q               # 29 tests, about 1 s
 ```
 
 Tests use the SDK's in-memory exporter and a fake model. CI also runs the demo, the viewer and a short benchmark.

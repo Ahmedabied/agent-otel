@@ -74,11 +74,63 @@ def _tracer() -> trace.Tracer:
     return _config.tracer or trace.get_tracer("agent-otel", __version__)
 
 
+def _small(value: Any, limit: int) -> bool:
+    """True when value is a few dozen items with short strings, so encoding it whole is cheap. Looks at no more
+    than 64 items, whatever the size of the value. Dict keys are not counted: at most 64 per dict, and a key long
+    enough to matter is rare."""
+    stack, budget, chars = [value], 64, 0
+    pop, extend = stack.pop, stack.extend
+    while stack:
+        v = pop()
+        budget -= 1
+        if budget < 0:
+            return False
+        t = type(v)
+        if t is str:
+            chars += len(v)
+            if chars > limit:
+                return False
+        elif t is dict:
+            if len(v) > 64:
+                return False
+            extend(v.values())
+        elif t is list or t is tuple:
+            if len(v) > 64:
+                return False
+            extend(v)
+        elif isinstance(v, (str, dict, list, tuple)):  # subclasses: no shortcut, stream them
+            return False
+    return True
+
+
+_JSON = json.JSONEncoder(default=str, ensure_ascii=False)  # made once: json.dumps with options makes one per call
+
+
+def _json_head(value: Any, limit: int) -> tuple[str, bool]:
+    """JSON text of value, and whether it ran past limit characters. Stops encoding soon after the limit, so a
+    tool that returns a million rows costs microseconds to trace, not the time to encode all of it. Small values
+    go to the faster C encoder whole."""
+    if _small(value, limit):
+        return _JSON.encode(value), False
+    parts, size = [], 0
+    for chunk in _JSON.iterencode(value):
+        parts.append(chunk)
+        size += len(chunk)
+        if size > limit:
+            return "".join(parts)[:limit], True
+    return "".join(parts), False
+
+
 def _content(value: Any) -> str:
     """Tool arguments or results as text for a span. Never raises: tracing must not break the app."""
     limit = _config.max_content_chars
     try:
-        text = value if isinstance(value, str) else json.dumps(value, default=str, ensure_ascii=False)
+        if isinstance(value, str):
+            text = value
+        else:
+            text, cut = _json_head(value, limit)
+            if cut:
+                return text + f"... [more than {limit} chars]"
     except Exception:  # circular references, a __str__ that raises, ...
         try:
             r = reprlib.Repr()  # attributes, not constructor arguments: those need Python 3.12

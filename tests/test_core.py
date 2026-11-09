@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import pytest
 
@@ -226,3 +227,45 @@ def test_tracing_never_raises_into_the_app(spans):
     assert "Unprintable" in s["execute_tool odd"].attributes[C.TOOL_CALL_RESULT]
     assert "Unprintable" in s["execute_tool odd"].attributes[C.TOOL_CALL_ARGUMENTS]
     assert s["execute_tool odd"].status.status_code.name != "ERROR"
+
+
+def test_content_is_capped_the_same_on_every_python():
+    from agent_otel import core
+
+    ao.configure(capture_content=True, max_content_chars=50)
+    try:
+        loop = []
+        loop.append(loop)
+        deep = 0
+        for _ in range(100_000):  # past every Python's json encoder
+            deep = [deep]
+        cases = {"loop": loop, "deep": deep, "list": list(range(100_000)), "text": "x" * 100_000,
+                 "odd": Unprintable()}
+        out = {k: core._content(v) for k, v in cases.items()}
+    finally:
+        ao.configure(None)
+    for k, text in out.items():
+        assert len(text) <= 50 + len("... [more than 50 chars]"), k
+    assert out["loop"] == "[[[[[...]]]]]"  # json gives up on the loop at once; reprlib's own cap, depth 4
+    assert out["deep"] == "[" * 50 + "... [more than 50 chars]"  # cut before the encoder goes too deep
+    assert out["list"] == "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,... [more than 50 chars]"
+    assert out["text"] == "x" * 50 + "... [100000 chars]"
+    assert "Unprintable" in out["odd"]
+
+
+def test_big_results_are_cut_while_encoding_and_small_ones_are_exact():
+    from agent_otel import core
+
+    ao.configure(capture_content=True, max_content_chars=100)
+    try:
+        docs = [{"id": i, "text": "lorem ipsum " * 20} for i in range(10_000)]
+        head = core._content(docs)
+        small = {"path": "/tmp/x", "n": 3, "tags": ["a", "b"], "nested": {"ok": True, "none": None}}
+        later_loop = list(range(100))
+        later_loop.append(later_loop)  # the loop is past the cap, so the head is still plain JSON
+        looped = core._content(later_loop)
+    finally:
+        ao.configure(None)
+    assert head == json.dumps(docs, ensure_ascii=False)[:100] + "... [more than 100 chars]"
+    assert core._content(small) == json.dumps(small, ensure_ascii=False)
+    assert looped == json.dumps(list(range(100)))[:100] + "... [more than 100 chars]"
