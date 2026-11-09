@@ -133,7 +133,8 @@ milliseconds, 30 microseconds does not show.
 
 `js/` is the same library for Node 22 and later: the same span names, attributes and run totals, written to the
 same JSON lines, so `agent-otel summary` and `agent-otel view` read runs from both (the TypeScript tests feed their
-output to the Python CLI in CI). About 2.7 us added per traced tool call (Node 22, `node js/bench/overhead.ts`).
+output to the Python CLI in CI). About 2.7 us added per traced tool call on a desktop (Node 22), 3.5 to 4.2 us on CI
+runners (Node 24 and 22), measured with `node js/bench/overhead.ts`.
 
 ```ts
 import { agent, configure, modelCall, tool } from "agent-otel";
