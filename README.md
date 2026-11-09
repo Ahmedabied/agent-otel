@@ -129,6 +129,32 @@ gets token counts but no cost, never a made-up one, and the run's total says how
 104,001 spans were written in that run and none were dropped. Next to a model call that takes hundreds of
 milliseconds, 30 microseconds does not show.
 
+## TypeScript
+
+`js/` is the same library for Node 22 and later: the same span names, attributes and run totals, written to the
+same JSON lines, so `agent-otel summary` and `agent-otel view` read runs from both (the TypeScript tests feed their
+output to the Python CLI in CI). About 2.7 us added per traced tool call (Node 22, `node js/bench/overhead.ts`).
+
+```ts
+import { agent, configure, modelCall, tool } from "agent-otel";
+
+configure({ prices: { currency: "USD", models: { "my-model-*": { input: 0.5, output: 1.5 } } } });
+const lookupOrder = tool("lookup_order", async (id: string) => orders.get(id));
+
+await agent("support", async () => {
+  await modelCall("my-model-small", async (call) => {
+    const answer = await myClient.chat(messages);
+    call.record({ inputTokens: answer.usage.input, outputTokens: answer.usage.output });
+  });
+  await lookupOrder("A1");
+});
+```
+
+Run totals are kept in an `AsyncLocalStorage`, so two agents running at once never mix their counts (tested). With
+no OpenTelemetry context manager registered, spans still nest under their agent; with one (the Node SDK registers
+it), they join the application's own traces. It is not on npm (that needs an account): build it from the clone with
+`cd js && npm ci && npm run compile` and install that folder.
+
 ## Limits
 
 - **You wrap the calls.** There is no automatic patching of model SDKs; two lines per call site, or `@ao.tool()`.
@@ -146,6 +172,7 @@ milliseconds, 30 microseconds does not show.
 ```sh
 pip install -e '.[test]'
 pytest -q               # 29 tests, about 1 s
+cd js && npm ci && npm test    # 7 tests; AGENT_OTEL_PYTHON=../.venv/bin/python also checks the Python CLI reads them
 ```
 
 Tests use the SDK's in-memory exporter and a fake model. CI also runs the demo, the viewer and a short benchmark.

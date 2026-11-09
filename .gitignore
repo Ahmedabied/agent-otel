@@ -9,3 +9,5 @@ runs/
 *.jsonl
 !tests/fixtures/*.jsonl
 uv.lock
+js/node_modules/
+js/dist/
