@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-otel"
+version = "0.1.0"
+description = "Traces, token cost and latency for AI agent tool and model calls, as OpenTelemetry spans with the GenAI conventions, plus a local HTML viewer."
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Ahmed Abied" }]
+requires-python = ">=3.10"
+dependencies = ["opentelemetry-api>=1.30", "opentelemetry-sdk>=1.30"]
+keywords = ["opentelemetry", "tracing", "ai-agents", "llm", "observability", "genai"]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[project.scripts]
+agent-otel = "agent_otel.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Ahmedabied/agent-otel"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_otel"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
