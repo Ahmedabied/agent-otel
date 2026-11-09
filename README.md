@@ -102,7 +102,7 @@ milliseconds, 30 microseconds does not show.
 
 ```sh
 pip install -e '.[test]'
-pytest -q               # 22 tests, about 1 s
+pytest -q               # 21 tests, about 1 s
 ```
 
 Tests use the SDK's in-memory exporter and a fake model. CI also runs the demo, the viewer and a short benchmark.
