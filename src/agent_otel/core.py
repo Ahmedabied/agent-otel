@@ -81,7 +81,9 @@ def _content(value: Any) -> str:
         text = value if isinstance(value, str) else json.dumps(value, default=str, ensure_ascii=False)
     except Exception:  # circular references, a __str__ that raises, ...
         try:
-            text = reprlib.Repr(maxlevel=4, maxstring=limit, maxother=limit).repr(value)
+            r = reprlib.Repr()  # attributes, not constructor arguments: those need Python 3.12
+            r.maxlevel, r.maxstring, r.maxother = 4, limit, limit
+            text = r.repr(value)
         except Exception:
             text = f"<{type(value).__qualname__} that cannot be shown>"
     return text if len(text) <= limit else text[:limit] + f"... [{len(text)} chars]"
