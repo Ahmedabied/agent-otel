@@ -125,3 +125,48 @@ def test_async_tools(spans):
     run = by_name(exp)["invoke_agent a"]
     assert len(s) == 2 and all(x.parent.span_id == run.context.span_id for x in s)
     assert run.attributes[C.TOTAL_TOOL_CALLS] == 2
+
+
+def test_threads_with_copied_context(spans):
+    import contextvars
+    from concurrent.futures import ThreadPoolExecutor
+
+    exp = spans()
+
+    @ao.tool()
+    def work(i):
+        return i
+
+    with ao.agent("pool") as run_span:
+        with ThreadPoolExecutor(2) as pool:
+            futures = [pool.submit(contextvars.copy_context().run, work, i) for i in range(3)]
+            assert [f.result() for f in futures] == [0, 1, 2]
+    s = by_name(exp)["invoke_agent pool"]
+    tools = [x for x in exp.get_finished_spans() if x.name == "execute_tool work"]
+    assert s.attributes[C.TOTAL_TOOL_CALLS] == 3
+    assert all(t.parent.span_id == run_span.get_span_context().span_id for t in tools)
+
+
+def test_joins_an_existing_global_setup(tmp_path):
+    import subprocess
+    import sys
+
+    code = """
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+import agent_otel as ao
+exp = InMemorySpanExporter()
+tp = TracerProvider(); tp.add_span_processor(SimpleSpanProcessor(exp)); trace.set_tracer_provider(tp)
+with trace.get_tracer("app").start_as_current_span("POST /chat") as req:
+    with ao.agent("bot"):
+        with ao.tool_call("t"):
+            pass
+names = {s.name: s for s in exp.get_finished_spans()}
+assert names["invoke_agent bot"].parent.span_id == req.get_span_context().span_id
+assert names["execute_tool t"].parent.span_id == names["invoke_agent bot"].context.span_id
+print("ok")
+"""
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert r.stdout.strip() == "ok", r.stderr
