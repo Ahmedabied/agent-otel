@@ -63,6 +63,25 @@ application already sets up OpenTelemetry, skip `setup`: agent-otel uses the glo
 join your existing traces and go wherever your exporters send them. `ao.configure(provider)` picks a provider
 explicitly.
 
+## Send it to Jaeger, or any OTLP backend
+
+agent-otel only makes standard OpenTelemetry spans, so the stock OTLP exporter sends them anywhere. The demo agent,
+exported to Jaeger 2.23 and opened in its trace view:
+
+![The demo agent's trace in Jaeger](docs/jaeger.png)
+
+Jaeger's GenAI view recognises the spans as they are: it counts the model and tool calls ("GenAI calls: 6") and
+marks the agent, model and tool spans. The failed carrier call and its retry show as two tool spans.
+
+```sh
+./jaeger                         # the binary from a Jaeger 2.x release; OTLP on :4318, the UI on :16686
+pip install -e '.[otlp]'
+python examples/otlp_jaeger.py   # sends two runs, reads them back from Jaeger's API, checks every span
+```
+
+CI runs the same check against a real Jaeger on every push: both runs stored, all five kinds of span present,
+token counts kept as integers, the run cost on the agent span.
+
 ## What each span carries
 
 | span | name | attributes |

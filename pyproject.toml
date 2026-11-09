@@ -15,6 +15,7 @@ keywords = ["opentelemetry", "tracing", "ai-agents", "llm", "observability", "ge
 
 [project.optional-dependencies]
 test = ["pytest>=8"]
+otlp = ["opentelemetry-exporter-otlp-proto-http>=1.30"]
 
 [project.scripts]
 agent-otel = "agent_otel.cli:main"

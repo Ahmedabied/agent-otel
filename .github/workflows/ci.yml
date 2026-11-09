@@ -29,3 +29,26 @@ jobs:
           agent-otel view runs/demo.jsonl -o runs/demo.html
       - name: Overhead benchmark (short)
         run: python bench/bench.py --calls 5000
+
+  jaeger:
+    # The spans sent over OTLP to a real Jaeger, then read back from its API and checked.
+    runs-on: ubuntu-latest
+    env:
+      JAEGER_VERSION: "2.23.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e '.[otlp]'
+      - name: Start Jaeger (release binary, checksum verified)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "v$JAEGER_VERSION" -R jaegertracing/jaeger -D /tmp/jaeger \
+            -p "jaeger-$JAEGER_VERSION-linux-amd64.tar.gz" -p "jaeger-$JAEGER_VERSION-linux-amd64.sha256sum.txt"
+          cd /tmp/jaeger && tar -xzf "jaeger-$JAEGER_VERSION-linux-amd64.tar.gz"
+          grep "/jaeger$" "jaeger-$JAEGER_VERSION-linux-amd64.sha256sum.txt" | sed 's/ \*/  /' | sha256sum -c -
+          nohup "./jaeger-$JAEGER_VERSION-linux-amd64/jaeger" > jaeger.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf http://localhost:16686/ > /dev/null && break; sleep 1; done
+      - run: python examples/otlp_jaeger.py
