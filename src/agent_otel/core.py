@@ -17,7 +17,9 @@ import contextvars
 import functools
 import inspect
 import json
+import reprlib
 import threading
+import warnings
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterator
@@ -47,6 +49,7 @@ class _Totals:
     output_tokens: int = 0
     cost: float = 0.0
     priced: bool = False
+    unpriced_calls: int = 0
     model_calls: int = 0
     tool_calls: int = 0
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -72,8 +75,15 @@ def _tracer() -> trace.Tracer:
 
 
 def _content(value: Any) -> str:
-    text = value if isinstance(value, str) else json.dumps(value, default=str, ensure_ascii=False)
+    """Tool arguments or results as text for a span. Never raises: tracing must not break the app."""
     limit = _config.max_content_chars
+    try:
+        text = value if isinstance(value, str) else json.dumps(value, default=str, ensure_ascii=False)
+    except Exception:  # circular references, a __str__ that raises, ...
+        try:
+            text = reprlib.Repr(maxlevel=4, maxstring=limit, maxother=limit).repr(value)
+        except Exception:
+            text = f"<{type(value).__qualname__} that cannot be shown>"
     return text if len(text) <= limit else text[:limit] + f"... [{len(text)} chars]"
 
 
@@ -92,15 +102,32 @@ class ModelCall:
     def record(self, input_tokens: int | None = None, output_tokens: int | None = None, *,
                response_model: str | None = None, finish_reasons: list[str] | None = None,
                response_id: str | None = None, cache_read_input_tokens: int | None = None,
+               cache_write_input_tokens: int | None = None,
                reasoning_output_tokens: int | None = None) -> None:
-        """Call once the model has answered, with the usage numbers from its response."""
+        """Call once the model has answered, with the usage numbers from its response.
+
+        input_tokens is ALL input tokens, cached ones included, as the OpenTelemetry GenAI conventions
+        define it; cache_read_input_tokens and cache_write_input_tokens are the parts of it that were
+        read from or written to the provider's prompt cache. Some APIs report input without the cached
+        parts (Anthropic's usage.input_tokens, for example): pass their sum as input_tokens. When the
+        cache counts are bigger than input_tokens they cannot be part of it, so they are added to it,
+        with a warning.
+        """
         s = self.span
+        read, write = int(cache_read_input_tokens or 0), int(cache_write_input_tokens or 0)
+        if input_tokens is not None and read + write > int(input_tokens):
+            warnings.warn(f"agent-otel: cache tokens ({read} read + {write} written) exceed input_tokens "
+                          f"({int(input_tokens)}), so input_tokens was taken to exclude them and they were added; "
+                          "pass input_tokens with the cached tokens included", stacklevel=2)
+            input_tokens = int(input_tokens) + read + write
         if input_tokens is not None:
             s.set_attribute(C.USAGE_INPUT_TOKENS, int(input_tokens))
         if output_tokens is not None:
             s.set_attribute(C.USAGE_OUTPUT_TOKENS, int(output_tokens))
         if cache_read_input_tokens is not None:
-            s.set_attribute(C.USAGE_CACHE_READ_INPUT_TOKENS, int(cache_read_input_tokens))
+            s.set_attribute(C.USAGE_CACHE_READ_INPUT_TOKENS, read)
+        if cache_write_input_tokens is not None:
+            s.set_attribute(C.USAGE_CACHE_WRITE_INPUT_TOKENS, write)
         if reasoning_output_tokens is not None:
             s.set_attribute(C.USAGE_REASONING_OUTPUT_TOKENS, int(reasoning_output_tokens))
         if response_model:
@@ -112,7 +139,7 @@ class ModelCall:
         prices = _config.prices
         if prices is not None:
             self.cost = prices.cost(response_model or self.model, int(input_tokens or 0), int(output_tokens or 0),
-                                    int(cache_read_input_tokens or 0))
+                                    read, write)
             if self.cost is not None:
                 s.set_attribute(C.COST, self.cost)
                 s.set_attribute(C.COST_CURRENCY, prices.currency)
@@ -123,6 +150,8 @@ class ModelCall:
                 if self.cost is not None:
                     run.cost += self.cost
                     run.priced = True
+                elif prices is not None:
+                    run.unpriced_calls += 1
 
 
 class ToolCall:
@@ -204,9 +233,12 @@ def agent(name: str, *, conversation_id: str | None = None, agent_id: str | None
             span.set_attribute(C.TOTAL_OUTPUT_TOKENS, totals.output_tokens)
             span.set_attribute(C.TOTAL_MODEL_CALLS, totals.model_calls)
             span.set_attribute(C.TOTAL_TOOL_CALLS, totals.tool_calls)
-            if totals.priced and _config.prices is not None:
-                span.set_attribute(C.TOTAL_COST, round(totals.cost, 10))
-                span.set_attribute(C.COST_CURRENCY, _config.prices.currency)
+            if _config.prices is not None:
+                # The total covers priced calls only; the count says how many it left out.
+                span.set_attribute(C.TOTAL_UNPRICED_CALLS, totals.unpriced_calls)
+                if totals.priced:
+                    span.set_attribute(C.TOTAL_COST, round(totals.cost, 10))
+                    span.set_attribute(C.COST_CURRENCY, _config.prices.currency)
 
 
 def tool(name: str | None = None, *, tool_type: str = "function") -> Callable:

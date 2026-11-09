@@ -58,6 +58,7 @@ def test_totals_and_cost_roll_up(spans):
     assert outer[C.TOTAL_COST] == pytest.approx(1.64) and outer[C.COST_CURRENCY] == "USD"
     assert inner[C.TOTAL_INPUT_TOKENS] == 500 and inner[C.TOTAL_COST] == 0
     assert inner[C.TOTAL_MODEL_CALLS] == 1
+    assert outer[C.TOTAL_UNPRICED_CALLS] == 1 and inner[C.TOTAL_UNPRICED_CALLS] == 0  # the total says what it left out
 
 
 def test_no_price_table_means_no_cost(spans):
@@ -68,6 +69,7 @@ def test_no_price_table_means_no_cost(spans):
     s = by_name(exp)
     assert C.COST not in s["chat hosted-small"].attributes
     assert C.TOTAL_COST not in s["invoke_agent a"].attributes
+    assert C.TOTAL_UNPRICED_CALLS not in s["invoke_agent a"].attributes
 
 
 def test_errors_mark_the_span_and_propagate(spans):
@@ -170,3 +172,57 @@ print("ok")
 """
     r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert r.stdout.strip() == "ok", r.stderr
+
+
+def test_cache_tokens_reported_apart_from_input_are_added_with_a_warning(spans):
+    # Anthropic-style usage: input_tokens leaves out the cache reads. 20 + 50,000 read + 300 out.
+    exp = spans(prices={"models": {"m": {"input": 3, "output": 15, "cache_read": 0.3}}})
+    with ao.agent("a"):
+        with ao.model_call("m") as m:
+            with pytest.warns(UserWarning, match="exceed input_tokens"):
+                m.record(input_tokens=20, output_tokens=300, cache_read_input_tokens=50_000)
+    chat = by_name(exp)["chat m"].attributes
+    assert chat[C.USAGE_INPUT_TOKENS] == 50_020 and chat[C.USAGE_CACHE_READ_INPUT_TOKENS] == 50_000
+    assert m.cost == pytest.approx((20 * 3 + 50_000 * 0.3 + 300 * 15) / 1e6)
+
+
+def test_cache_writes_are_counted_and_priced(spans, recwarn):
+    exp = spans(prices={"models": {"m": {"input": 1, "output": 0, "cache_read": 0.1, "cache_write": 1.25}}})
+    with ao.model_call("m") as m:
+        m.record(input_tokens=1_000_000, output_tokens=0, cache_read_input_tokens=300_000,
+                 cache_write_input_tokens=200_000)
+    # 500k fresh at 1.0 + 300k read at 0.1 + 200k written at 1.25, per million
+    assert m.cost == pytest.approx(0.5 + 0.03 + 0.25)
+    assert by_name(exp)["chat m"].attributes[C.USAGE_CACHE_WRITE_INPUT_TOKENS] == 200_000
+    assert not recwarn.list  # counts inside input_tokens are the normal case
+
+
+class Unprintable:
+    def __str__(self):
+        raise RuntimeError("no str")
+
+    def __repr__(self):
+        raise RuntimeError("no repr")
+
+
+def test_tracing_never_raises_into_the_app(spans):
+    exp = spans(capture_content=True)
+
+    @ao.tool()
+    def make_graph():
+        a = []
+        a.append(a)  # json.dumps: "Circular reference detected"
+        return a
+
+    @ao.tool()
+    def odd(x):
+        return {"thing": Unprintable()}
+
+    graph = make_graph()
+    assert graph[0] is graph
+    assert odd(Unprintable())["thing"]
+    s = by_name(exp)
+    assert s["execute_tool make_graph"].attributes[C.TOOL_CALL_RESULT].startswith("[[")  # a capped repr
+    assert "Unprintable" in s["execute_tool odd"].attributes[C.TOOL_CALL_RESULT]
+    assert "Unprintable" in s["execute_tool odd"].attributes[C.TOOL_CALL_ARGUMENTS]
+    assert s["execute_tool odd"].status.status_code.name != "ERROR"

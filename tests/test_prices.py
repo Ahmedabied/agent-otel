@@ -18,9 +18,17 @@ def test_cache_reads_never_exceed_input():
     assert p.cost("m", 100, 0, cache_read_tokens=500) == pytest.approx(100 / 1e6)
 
 
+def test_cache_prices_default_to_the_input_price():
+    p = Prices({"models": {"m": {"input": 2, "output": 0}}})
+    assert p.cost("m", 1_000_000, 0, cache_read_tokens=400_000, cache_write_tokens=100_000) == 2.0
+    q = Prices({"models": {"m": {"input": 2, "output": 0, "cache_write": 2.5}}})
+    assert q.cost("m", 1_000_000, 0, cache_write_tokens=200_000) == pytest.approx(1.6 + 0.5)
+
+
 @pytest.mark.parametrize("bad", [{}, {"models": []}, {"models": {"m": {"input": 1}}},
                                  {"models": {"m": {"input": "x", "output": 1}}},
-                                 {"models": {"m": {"input": -1, "output": 1}}}])
+                                 {"models": {"m": {"input": -1, "output": 1}}},
+                                 {"models": {"m": {"input": 1, "output": 1, "cache_write": -1}}}])
 def test_bad_tables(bad):
     with pytest.raises(PriceError):
         Prices(bad)

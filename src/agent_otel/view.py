@@ -54,6 +54,8 @@ def traces(spans: list[dict]) -> list[dict]:
         walk(None, 0)
         models = [r for r in rows if r["kind"] == "model"]
         costs = [r["cost"] for r in models if r["cost"] is not None]
+        # Calls that reported usage but matched no price: the cost total leaves them out.
+        unpriced = sum(1 for r in models if r["cost"] is None and (r["input_tokens"] is not None or r["output_tokens"] is not None))
         steps = [r for r in rows if r["kind"] in ("model", "tool")]
         slowest = max(steps, key=lambda r: r["duration_ms"], default=None)
         currency = next((s["attributes"].get(C.COST_CURRENCY) for s in items if s["attributes"].get(C.COST_CURRENCY)), "")
@@ -67,6 +69,7 @@ def traces(spans: list[dict]) -> list[dict]:
             "input_tokens": sum(r["input_tokens"] or 0 for r in models),
             "output_tokens": sum(r["output_tokens"] or 0 for r in models),
             "cost": round(sum(costs), 10) if costs else None,
+            "unpriced_calls": unpriced if costs else 0,
             "currency": currency,
             "errors": sum(1 for r in rows if r["error"]),
             "slowest": {"name": slowest["name"], "duration_ms": slowest["duration_ms"]} if slowest else None,
@@ -80,6 +83,8 @@ def summary_text(runs: list[dict]) -> str:
     lines = []
     for t in runs:
         cost = f"{t['cost']:.4f} {t['currency']}".strip() if t["cost"] is not None else "no prices"
+        if t["unpriced_calls"]:
+            cost += f" ({t['unpriced_calls']} of {t['model_calls']} model calls unpriced, not in it)"
         slow = f"{t['slowest']['name']} {t['slowest']['duration_ms']:.0f} ms" if t["slowest"] else "-"
         lines.append(f"{t['name']}  ({t['trace_id'][:8]})")
         lines.append(f"  {t['duration_ms']:.0f} ms, {t['model_calls']} model calls, {t['tool_calls']} tool calls, "
@@ -150,7 +155,8 @@ for (const t of runs) {
   stat("model calls", String(t.model_calls));
   stat("tool calls", String(t.tool_calls));
   stat("tokens", t.input_tokens + " in / " + t.output_tokens + " out");
-  stat("cost", t.cost == null ? "no prices" : t.cost.toFixed(4) + " " + t.currency);
+  stat("cost", t.cost == null ? "no prices" : t.cost.toFixed(4) + " " + t.currency +
+    (t.unpriced_calls ? " (" + t.unpriced_calls + " of " + t.model_calls + " calls unpriced)" : ""));
   if (t.errors) stat("errors", String(t.errors));
   if (t.slowest) stat("slowest", t.slowest.name + " " + ms(t.slowest.duration_ms));
   card.append(stats);

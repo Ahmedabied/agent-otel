@@ -73,3 +73,24 @@ def test_demo_runs():
     assert r.returncode == 0, r.stderr
     runs = traces(read_spans("runs/demo.jsonl"))
     assert len(runs) == 2 and runs[0]["errors"] == 1 and runs[0]["cost"] > 0
+
+
+def test_unpriced_calls_are_shown(tmp_path):
+    f = tmp_path / "run.jsonl"
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(JsonlExporter(f)))
+    ao.configure(provider, prices={"models": {"local-*": {"input": 1, "output": 1}}})
+    try:
+        with ao.agent("bot"):
+            with ao.model_call("local-1") as m:
+                m.record(input_tokens=10, output_tokens=5)
+            with ao.model_call("big-unpriced") as m:
+                m.record(input_tokens=200_000, output_tokens=5_000)
+    finally:
+        ao.configure(None)
+        provider.shutdown()
+    run = traces(read_spans(f))[0]
+    assert run["cost"] == 15 / 1e6 and run["unpriced_calls"] == 1
+    from agent_otel.view import summary_text
+    assert "1 of 2 model calls unpriced" in summary_text([run])
+    assert "calls unpriced" in render_html([run])
