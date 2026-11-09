@@ -8,3 +8,4 @@ build/
 runs/
 *.jsonl
 !tests/fixtures/*.jsonl
+uv.lock
