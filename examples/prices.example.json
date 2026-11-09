@@ -1,0 +1,8 @@
+{
+  "currency": "USD",
+  "models": {
+    "local-*": {"input": 0, "output": 0},
+    "example-hosted-small": {"input": 0.5, "output": 1.5, "cache_read": 0.05},
+    "example-hosted-large": {"input": 3.0, "output": 15.0, "cache_read": 0.3}
+  }
+}
