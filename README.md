@@ -2,7 +2,8 @@
 
 An agent run is a chain of model calls and tool calls, and when it is slow or expensive you want to know which
 step. agent-otel records each step as an OpenTelemetry span with the GenAI semantic conventions, adds token and
-cost totals per run, and shows a run as a waterfall you can open in a browser.
+cost totals per run, and shows a run as a waterfall you can open in a browser. Give it a meter provider and it
+also records the GenAI metrics (tokens, cost, latency per model, tool and agent) for dashboards and alerts.
 
 ![agent-otel viewer: two runs of a support agent, one with a failed tool call and a retry](docs/viewer.png)
 
@@ -82,6 +83,69 @@ python examples/otlp_jaeger.py   # sends two runs, reads them back from Jaeger's
 CI runs the same check against a real Jaeger on every push: both runs stored, all five kinds of span present,
 token counts kept as integers, the run cost on the agent span.
 
+## Metrics for dashboards and alerts
+
+A trace answers "what happened in this run". Metrics answer the questions across all runs: spend per model per
+hour, p95 latency per tool, how often an agent fails. Pass a `MeterProvider` and agent-otel records the GenAI
+metrics from the same numbers as the spans:
+
+```python
+from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+
+meters = MeterProvider(metric_readers=[PeriodicExportingMetricReader(OTLPMetricExporter())])
+ao.configure(prices="prices.json", meter_provider=meters)  # or opentelemetry.metrics.get_meter_provider()
+```
+
+| metric | kind | recorded | attributes |
+|---|---|---|---|
+| `gen_ai.client.inference.duration` | histogram, s | each model call | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`, `gen_ai.response.model`, `error.type` when it failed |
+| `gen_ai.client.inference.operation.input_tokens`, `.output_tokens` | histogram | each model call, 0 when no usage came back | the same |
+| `gen_ai.client.inference.usage.input_tokens`, `.output_tokens`, `.cache_read.input_tokens`, `.cache_write.input_tokens`, `.reasoning.output_tokens` | counter | positive amounts only | the same without `error.type`, plus `gen_ai.token.modality="unknown"` (not on reasoning) |
+| `gen_ai.client.embeddings.duration`, `.operation.input_tokens` | histogram | calls with `operation="embeddings"`, instead of the inference ones | as the inference ones |
+| `gen_ai.execute_tool.duration` | histogram, s | each tool call | `gen_ai.tool.name`, `gen_ai.tool.type`, `gen_ai.agent.name`, `error.type` |
+| `gen_ai.invoke_agent.duration` | histogram, s | each agent run | `gen_ai.agent.name`, `error.type` |
+| `gen_ai.invoke_agent.inference_calls`, `.tool_calls` | histogram | each agent run: the calls it made itself, so a nested agent counts its own and no call is counted twice | `gen_ai.agent.name` |
+| `agent_otel.cost`, `agent_otel.unpriced_calls` | counter | model calls with usage, when you gave a price table | as the model call, plus the currency on cost |
+
+- Each value is recorded once, when the call's block ends, from its final numbers and the same clock reading as
+  its span: a metric's duration equals the span's to the nanosecond (tested), so a dashboard and a trace agree.
+- Only low-cardinality attributes. No conversation, response, tool call or agent ids and no content, even with
+  `capture_content=True` (tested): each distinct value would be its own time series.
+- The bucket boundaries are the conventions' own (10 ms to 82 s for calls, up to a day for agent runs).
+- The names are from semantic-conventions-genai at commit e6658f1 (2026-11-06), where these metrics are still
+  unreleased. They replace `gen_ai.client.token.usage` and, for these operations, `gen_ai.client.operation.duration`,
+  so a dashboard built on those older names will not show these.
+
+Checked against a real Prometheus (3.16, its OTLP receiver):
+
+```sh
+./prometheus --web.enable-otlp-receiver   # Prometheus 3.x; OTLP in at :9090/api/v1/otlp/v1/metrics
+pip install -e '.[otlp]'
+python examples/otlp_prometheus.py        # sends two runs, reads them back with PromQL, compares with the spans
+```
+
+```
+check                         from the spans   in Prometheus
+model calls                                4               4
+input tokens                            1664            1664
+output tokens                             86              86
+tool calls                                 5               5
+failed tool calls                          1               1
+agent runs                                 2               2
+cost                               0.0005215       0.0005215
+model calls, per run sums                  4               4
+```
+
+CI runs it on every push. Prometheus stores the names as `gen_ai_client_inference_usage_input_tokens_total`,
+`gen_ai_execute_tool_duration_seconds_bucket` and so on, so the two questions above become:
+
+```promql
+sum by (gen_ai_request_model) (increase(agent_otel_cost_total[1h]))
+histogram_quantile(0.95, sum by (le, gen_ai_tool_name) (rate(gen_ai_execute_tool_duration_seconds_bucket[5m])))
+```
+
 ## What each span carries
 
 | span | name | attributes |
@@ -117,17 +181,22 @@ gets token counts but no cost, never a made-up one, and the run's total says how
 
 ## How much it costs to trace
 
-`python bench/bench.py --calls 50000`, Python 3.12 on an Intel i5-14400F:
+`python bench/bench.py --calls 50000`, Python 3.12 on an Intel i5-14400F (three runs, 2026-11-10):
 
 | | per call |
 |---|---|
-| bare function call | 0.04 us |
-| tool span, tracing not set up | 5.5 us |
-| tool span, exported to a JSON lines file | 21 us |
-| model span with usage and cost, exported | 30 us |
+| bare function call | 0.02 us |
+| tool span, tracing not set up | 6.0 to 6.5 us |
+| tool span, exported to a JSON lines file | 22 us |
+| model span with usage and cost, exported | 31 to 32 us |
+| tool span, plus metrics | 32 to 34 us |
+| model span with usage and cost, plus metrics | 75 to 80 us |
 
-104,001 spans were written in that run and none were dropped. Next to a model call that takes hundreds of
-milliseconds, 30 microseconds does not show.
+208,002 spans were written in each run and none were dropped. Metrics add about 10 us to a tool call and 45 us
+to a model call, which records about ten values; under a profiler, agent-otel's own code is about 6% of that and
+the OpenTelemetry SDK the rest. Next to a model call that takes hundreds of milliseconds, 80 microseconds does
+not show. With metrics off, a model span costs what it did before metrics existed (0.4 us more, median of six
+same-process comparisons with the previous release on Python 3.13, inside the run-to-run noise of -0.3 to +2.8 us).
 
 ## TypeScript
 
@@ -167,6 +236,8 @@ integers, the failed carrier call marked with its error type.
 - **Threads need their context.** Totals and the current span follow asyncio tasks, but not new threads. In a
   thread pool, submit with `contextvars.copy_context().run`.
 - **The GenAI conventions are still in development.** Names may change again; agent-otel will follow.
+- **Metrics are Python only for now.** The TypeScript side makes the same spans but no metrics yet.
+- **Token modality is always `unknown`.** `record()` takes totals, not a text, image and audio split.
 - **Content is off by default.** With `capture_content=True`, tool arguments and results are stored (capped at
   4,000 characters) and may contain personal data. A big result is cut while it is encoded, not after: a tool
   returning 10,000 documents costs 32 us to record instead of 4.8 ms, a million numbers 126 us instead of 29 ms
@@ -177,13 +248,15 @@ integers, the failed carrier call marked with its error type.
 
 ```sh
 pip install -e '.[test]'
-pytest -q               # 29 tests, about 1 s
+pytest -q               # 43 tests, about 1 s
 cd js && npm ci
 npm run typecheck       # src, tests, bench and examples
 npm test                # 7 tests; with AGENT_OTEL_PYTHON=../.venv/bin/python the Python CLI reads their output too
 ```
 
-Tests use the SDK's in-memory exporter and a fake model. CI also runs the demo, the viewer and a short benchmark.
+Tests use the SDK's in-memory exporters and a fake model. CI runs them on Python 3.10, 3.12 and 3.13, and on 3.10
+with the lowest OpenTelemetry the package allows (1.30), plus the demo, the viewer, a short benchmark, and the
+Jaeger and Prometheus checks.
 
 Built with AI pair programming.
 

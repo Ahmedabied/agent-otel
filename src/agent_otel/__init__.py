@@ -1,6 +1,6 @@
 """agent-otel: traces, token cost and latency for AI agent tool and model calls."""
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 from .core import ModelCall, ToolCall, agent, configure, model_call, tool, tool_call  # noqa: E402
 from .export import JsonlExporter, read_spans  # noqa: E402

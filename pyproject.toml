@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agent-otel"
-version = "0.1.0"
+version = "0.2.0"
 description = "Traces, token cost and latency for AI agent tool and model calls, as OpenTelemetry spans with the GenAI conventions, plus a local HTML viewer."
 readme = "README.md"
 license = "MIT"
