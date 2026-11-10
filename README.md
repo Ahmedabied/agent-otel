@@ -123,19 +123,21 @@ Checked against a real Prometheus (3.16, its OTLP receiver):
 ```sh
 ./prometheus --web.enable-otlp-receiver   # Prometheus 3.x; OTLP in at :9090/api/v1/otlp/v1/metrics
 pip install -e '.[otlp]'
-python examples/otlp_prometheus.py        # sends two runs, reads them back with PromQL, compares with the spans
+python examples/otlp_prometheus.py        # sends three runs, reads them back with PromQL, compares with the spans
 ```
 
 ```
 check                         from the spans   in Prometheus
-model calls                                4               4
-input tokens                            1664            1664
-output tokens                             86              86
+model calls                                5               5
+input tokens                            1676            1676
+output tokens                             89              89
 tool calls                                 5               5
 failed tool calls                          1               1
-agent runs                                 2               2
+agent runs                                 3               3
 cost                               0.0005215       0.0005215
-model calls, per run sums                  4               4
+unpriced model calls                       1               1
+model calls, per run sums                  5               5
+names in alerts.yml stored                 5               5
 ```
 
 CI runs it on every push, and the TypeScript side's own check (`node js/examples/otlp-prometheus.ts`) after it.
@@ -146,6 +148,18 @@ Prometheus stores the names as `gen_ai_client_inference_usage_input_tokens_total
 sum by (gen_ai_request_model) (increase(agent_otel_cost_total[1h]))
 histogram_quantile(0.95, sum by (le, gen_ai_tool_name) (rate(gen_ai_execute_tool_duration_seconds_bucket[5m])))
 ```
+
+### Alerts
+
+[examples/prometheus/alerts.yml](examples/prometheus/alerts.yml) has five starting rules: an agent whose runs fail
+(over 10% in 15 minutes, pages), a model whose calls fail (over 5%, pages), a slow tool (p95 over 10 s, ticket),
+spend over an hourly budget (pages), and calls to a model missing from the price table (ticket: every cost total
+leaves them out until you add it). Each threshold is a placeholder for your own traffic.
+
+They have unit tests ([alerts.test.yml](examples/prometheus/alerts.test.yml), `promtool test rules`): each rule
+fires on the series it is written for, stays quiet below its threshold and inside its `for` window, and names the
+right agent, model or tool. Tests written on made-up series can pass with a misspelt metric name, so the
+Prometheus check above also confirms that every name the rules use is one Prometheus really stored. Both run in CI.
 
 ## What each span carries
 

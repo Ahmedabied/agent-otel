@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 import urllib.parse
@@ -36,10 +37,11 @@ import demo_agent  # noqa: E402  (the same fake support agent as the other demos
 
 PROMETHEUS = os.environ.get("PROMETHEUS_URL", "http://localhost:9090")
 SERVICE = "demo-support"
+ALERTS = Path(__file__).parent / "prometheus" / "alerts.yml"
 
 
 def export() -> tuple[str, list]:
-    """Run the demo twice; metrics go to Prometheus, spans stay in memory. Returns the run id and spans."""
+    """Run the demo twice and one unpriced call; metrics go to Prometheus, spans stay in memory."""
     run_id = uuid.uuid4().hex[:12]
     resource = Resource.create({"service.name": SERVICE, "service.instance.id": run_id})
     spans = InMemorySpanExporter()
@@ -54,6 +56,9 @@ def export() -> tuple[str, list]:
     demo_agent.handle("where is my order? it was meant to come yesterday", "conv-1")
     demo_agent.flaky_calls["n"] = 1
     demo_agent.handle("has my parcel shipped yet", "conv-2")
+    with ao.agent("support-agent"):  # a model missing from the price table, so the unpriced counter is sent too
+        with ao.model_call("example-unlisted", provider="example") as m:
+            m.record(input_tokens=12, output_tokens=3)
     meters.shutdown()  # sends the metrics
     tracer.shutdown()
     ao.configure(None)
@@ -119,6 +124,7 @@ def check(run_id: str, spans: list, names: list[str]) -> tuple[list[str], list[t
             sum(1 for s in tools if C.ERROR_TYPE in s.attributes), extra=',error_type!=""')
     compare("agent runs", C.M_INVOKE_AGENT_DURATION, True, len(agents))
     compare("cost", C.COST, False, sum(s.attributes.get(C.TOTAL_COST, 0.0) for s in agents))
+    compare("unpriced model calls", C.M_UNPRICED_CALLS, False, sum(1 for s in chats if C.COST not in s.attributes))
     calls = find(C.M_INVOKE_AGENT_INFERENCE_CALLS, True)
     if calls:
         made = total(f"sum({calls.removesuffix('_count')}_sum{{{sel}}})")
@@ -132,6 +138,13 @@ def check(run_id: str, spans: list, names: list[str]) -> tuple[list[str], list[t
         want = {repr(b) for b in C.SECONDS_BUCKETS} | {"+Inf"}
         if not want <= les:
             problems.append(f"{bucket}: bucket bounds {sorted(les)} miss {sorted(want - les)}")
+    # The alert rules are unit tested on series written by hand; this makes sure those names are the real ones.
+    in_rules = set(re.findall(r"\b((?:gen_ai|agent_otel)_[a-z_]+)(?=[{\[])", ALERTS.read_text()))
+    if not in_rules:
+        problems.append(f"{ALERTS.name}: no metric names found")
+    for name in sorted(in_rules - set(names)):
+        problems.append(f"{ALERTS.name} uses {name}, which Prometheus did not store")
+    rows.append((f"names in {ALERTS.name} stored", "", len(in_rules), len(in_rules & set(names))))
     return problems, rows
 
 

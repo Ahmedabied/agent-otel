@@ -1,0 +1,58 @@
+# Alert rules for agent-otel's metrics, as Prometheus stores them from OTLP. Tested with
+# `promtool test rules alerts.test.yml`, and every metric name here is checked against a real Prometheus in CI.
+# The thresholds are starting points: set them from your own traffic. Load with `rule_files: [alerts.yml]`.
+groups:
+  - name: agent-otel
+    rules:
+      - alert: AgentRunsFailing
+        # More than 10% of an agent's runs ended in an error, over the last 15 minutes.
+        expr: |
+          sum by (gen_ai_agent_name) (rate(gen_ai_invoke_agent_duration_seconds_count{error_type!=""}[15m]))
+            /
+          sum by (gen_ai_agent_name) (rate(gen_ai_invoke_agent_duration_seconds_count[15m]))
+            > 0.10
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.gen_ai_agent_name }}: {{ $value | humanizePercentage }} of runs are failing"
+
+      - alert: ModelCallsFailing
+        # More than 5% of calls to one model failed, over 15 minutes: the provider, a quota or a bad deploy.
+        expr: |
+          sum by (gen_ai_provider_name, gen_ai_request_model) (rate(gen_ai_client_inference_duration_seconds_count{error_type!=""}[15m]))
+            /
+          sum by (gen_ai_provider_name, gen_ai_request_model) (rate(gen_ai_client_inference_duration_seconds_count[15m]))
+            > 0.05
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $labels.gen_ai_request_model }}: {{ $value | humanizePercentage }} of calls are failing"
+
+      - alert: ToolCallsSlow
+        # A tool's p95 over 15 minutes is above 10 seconds.
+        expr: |
+          histogram_quantile(0.95, sum by (le, gen_ai_tool_name) (rate(gen_ai_execute_tool_duration_seconds_bucket[15m])))
+            > 10
+        for: 10m
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $labels.gen_ai_tool_name }}: p95 is {{ $value | humanizeDuration }}"
+
+      - alert: SpendAboveBudget
+        # More than 5 (in your price table's currency) spent in the last hour. Set your own budget.
+        expr: sum(increase(agent_otel_cost_total[1h])) > 5
+        labels:
+          severity: page
+        annotations:
+          summary: "{{ $value | printf \"%.2f\" }} spent on model calls in the last hour"
+
+      - alert: ModelCallsUnpriced
+        # Calls to a model that is not in the price table: every cost total leaves them out.
+        expr: sum by (gen_ai_request_model) (increase(agent_otel_unpriced_calls_total[1h])) > 0
+        labels:
+          severity: ticket
+        annotations:
+          summary: "{{ $labels.gen_ai_request_model }} is not in the price table, so cost totals are low"
