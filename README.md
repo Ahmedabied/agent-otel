@@ -309,7 +309,7 @@ npm run typecheck       # src, tests, bench and examples
 npm test                # 16 tests; with AGENT_OTEL_PYTHON=../.venv/bin/python the Python CLI reads their output too
 ```
 
-Tests use the SDK's in-memory exporters and a fake model. CI runs them on Python 3.10, 3.12 and 3.13, and on 3.10
+Tests use the SDK's in-memory exporters and a fake model. CI runs them on Python 3.10, 3.12, 3.13, 3.14 and 3.15, and on 3.10
 with the lowest OpenTelemetry the package allows (1.30), plus the demo, the viewer, a short benchmark, and the
 Jaeger and Prometheus checks.
 
