@@ -79,6 +79,10 @@ def traces(spans: list[dict]) -> list[dict]:
     return out
 
 
+def _count(n: int, word: str) -> str:
+    return f"{n} {word}" if n == 1 else f"{n} {word}s"
+
+
 def summary_text(runs: list[dict]) -> str:
     lines = []
     for t in runs:
@@ -87,8 +91,9 @@ def summary_text(runs: list[dict]) -> str:
             cost += f" ({t['unpriced_calls']} of {t['model_calls']} model calls unpriced, not in it)"
         slow = f"{t['slowest']['name']} {t['slowest']['duration_ms']:.0f} ms" if t["slowest"] else "-"
         lines.append(f"{t['name']}  ({t['trace_id'][:8]})")
-        lines.append(f"  {t['duration_ms']:.0f} ms, {t['model_calls']} model calls, {t['tool_calls']} tool calls, "
-                     f"{t['input_tokens']} in / {t['output_tokens']} out tokens, cost {cost}, {t['errors']} errors")
+        lines.append(f"  {t['duration_ms']:.0f} ms, {_count(t['model_calls'], 'model call')}, "
+                     f"{_count(t['tool_calls'], 'tool call')}, {t['input_tokens']} in / {t['output_tokens']} out "
+                     f"tokens, cost {cost}, {_count(t['errors'], 'error')}")
         lines.append(f"  slowest step: {slow}")
     return "\n".join(lines)
 

@@ -58,7 +58,8 @@ def test_cli(tmp_path):
     f = tmp_path / "run.jsonl"
     record(f)
     r = subprocess.run([sys.executable, "-m", "agent_otel", "summary", str(f)], capture_output=True, text=True)
-    assert r.returncode == 0 and "1 model calls, 1 tool calls" in r.stdout and "no prices" in r.stdout
+    assert r.returncode == 0 and "1 model call, 1 tool call, " in r.stdout and ", 1 error\n" in r.stdout
+    assert "no prices" in r.stdout
     r = subprocess.run([sys.executable, "-m", "agent_otel", "summary", str(f), "--json"], capture_output=True, text=True)
     assert json.loads(r.stdout)[0]["errors"] == 1
     r = subprocess.run([sys.executable, "-m", "agent_otel", "view", str(f), "-o", str(tmp_path / "v.html")],
@@ -92,5 +93,7 @@ def test_unpriced_calls_are_shown(tmp_path):
     run = traces(read_spans(f))[0]
     assert run["cost"] == 15 / 1e6 and run["unpriced_calls"] == 1
     from agent_otel.view import summary_text
-    assert "1 of 2 model calls unpriced" in summary_text([run])
+    text = summary_text([run])
+    assert "1 of 2 model calls unpriced" in text and ", 2 model calls, " in text
+    assert text.splitlines()[1].endswith(", 0 errors")
     assert "calls unpriced" in render_html([run])

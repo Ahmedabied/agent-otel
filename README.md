@@ -19,7 +19,7 @@ agent-otel view runs/demo.jsonl --open
 
 ```
 invoke_agent support-agent  (464a8c2f)
-  346 ms, 2 model calls, 3 tool calls, 839 in / 43 out tokens, cost 0.0003 USD, 1 errors
+  346 ms, 2 model calls, 3 tool calls, 839 in / 43 out tokens, cost 0.0003 USD, 1 error
   slowest step: execute_tool track_parcel 91 ms
 ```
 
@@ -285,6 +285,27 @@ Over OTLP it needs nothing of its own either: `node js/examples/otlp-jaeger.ts` 
 to Jaeger with the stock exporter, reads both runs back from Jaeger's API and makes the same checks as the Python
 example. CI runs it against the real Jaeger after the Python one: 2 traces, 11 spans, token counts stored as
 integers, the failed carrier call marked with its error type.
+
+## Tool calls through agent-guard
+
+If the agent's tools are MCP servers behind [agent-guard](https://github.com/Ahmedabied/agent-guard), a policy proxy
+that allows, denies or asks before a tool call runs, its decisions join this trace with no glue between the two.
+The official MCP SDK clients send the current span with each request. Inside `tool_call` or `@tool` that span is
+the tool span, so the guard's decision hangs under it:
+
+```
+invoke_agent ops-agent                        agent-otel
+  execute_tool read_file                      agent-otel
+    MCP send tools/call read_file             the SDK client
+      agent-guard tools/call read_file        the guard: allowed
+      tools/call read_file                    the server
+  execute_tool drop_database
+    MCP send tools/call drop_database
+      agent-guard tools/call drop_database    the guard: denied, so nothing from the server
+```
+
+agent-guard's CI runs the two together and checks this shape: each decision under its own tool call, and no server
+span under a denied one.
 
 ## Limits
 
