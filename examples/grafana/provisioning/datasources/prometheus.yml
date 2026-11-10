@@ -1,0 +1,13 @@
+# Grafana data source for the dashboard. PROMETHEUS_URL comes from the environment.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: prometheus  # the dashboard's panels refer to this uid
+    type: prometheus
+    access: proxy
+    url: ${PROMETHEUS_URL}
+    isDefault: true
+    jsonData:
+      # Set this to your metric export interval (the OpenTelemetry SDK default is 60s):
+      # $__rate_interval is four times it, so every rate() window holds enough samples.
+      timeInterval: 15s

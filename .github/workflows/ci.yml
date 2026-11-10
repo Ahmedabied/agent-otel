@@ -134,3 +134,50 @@ jobs:
           node examples/otlp-prometheus.ts
       - if: failure()
         run: cat /tmp/prom/prometheus.log
+
+  grafana:
+    # The dashboard provisioned into a real Grafana, every panel query run through Grafana's own API.
+    runs-on: ubuntu-latest
+    env:
+      PROMETHEUS_VERSION: "3.16.0"
+      GRAFANA_VERSION: "13.3.0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e '.[otlp]'
+      - name: Start Prometheus (release binary, checksum verified)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "v$PROMETHEUS_VERSION" -R prometheus/prometheus -D /tmp/prom \
+            -p "prometheus-$PROMETHEUS_VERSION.linux-amd64.tar.gz" -p sha256sums.txt
+          cd /tmp/prom
+          grep " prometheus-$PROMETHEUS_VERSION.linux-amd64.tar.gz$" sha256sums.txt | sha256sum -c -
+          tar -xzf "prometheus-$PROMETHEUS_VERSION.linux-amd64.tar.gz"
+          cd "prometheus-$PROMETHEUS_VERSION.linux-amd64"
+          nohup ./prometheus --config.file=prometheus.yml --web.enable-otlp-receiver > /tmp/prom/prometheus.log 2>&1 &
+          for i in $(seq 1 30); do curl -sf http://localhost:9090/-/ready > /dev/null && break; sleep 1; done
+      - name: Start Grafana (release tarball, checksum verified)
+        run: |
+          mkdir -p /tmp/grafana && cd /tmp/grafana
+          base="https://dl.grafana.com/oss/release/grafana-$GRAFANA_VERSION.linux-amd64.tar.gz"
+          curl -sfL -o grafana.tar.gz "$base"
+          echo "$(curl -sfL "$base.sha256")  grafana.tar.gz" | sha256sum -c -
+          tar -xzf grafana.tar.gz
+          export GF_PATHS_DATA=/tmp/grafana/data GF_PATHS_LOGS=/tmp/grafana/data/log GF_PATHS_PLUGINS=/tmp/grafana/data/plugins
+          export GF_PATHS_PROVISIONING="$GITHUB_WORKSPACE/examples/grafana/provisioning"
+          export GF_SERVER_HTTP_ADDR=127.0.0.1 GF_AUTH_ANONYMOUS_ENABLED=true GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer
+          export GF_ANALYTICS_REPORTING_ENABLED=false GF_ANALYTICS_CHECK_FOR_UPDATES=false
+          export GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES=false GF_NEWS_NEWS_FEED_ENABLED=false GF_PLUGINS_PREINSTALL_DISABLED=true
+          export PROMETHEUS_URL=http://127.0.0.1:9090 AGENT_OTEL_DASHBOARDS="$GITHUB_WORKSPACE/examples/grafana"
+          cd "grafana-$GRAFANA_VERSION"
+          nohup ./bin/grafana server --homepath "$PWD" > /tmp/grafana/grafana.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:3000/api/health > /dev/null && break; sleep 1; done
+      - name: Feed the demo agents for 90 seconds (one process, metrics every 5 s)
+        run: python examples/feed_prometheus.py --seconds 90
+      - run: python examples/grafana/check_dashboard.py --grafana http://127.0.0.1:3000 --minutes 5
+      - if: failure()
+        run: tail -n 80 /tmp/grafana/grafana.log; tail -n 40 /tmp/prom/prometheus.log
+

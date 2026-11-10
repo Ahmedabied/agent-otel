@@ -151,6 +151,30 @@ sum by (gen_ai_request_model) (increase(agent_otel_cost_total[1h]))
 histogram_quantile(0.95, sum by (le, gen_ai_tool_name) (rate(gen_ai_execute_tool_duration_seconds_bucket[5m])))
 ```
 
+### A Grafana dashboard
+
+[examples/grafana/agent-otel.json](examples/grafana/agent-otel.json) is a dashboard for these metrics: spend in
+the last hour, model calls per minute, the share of agent runs failing, unpriced calls; then spend per hour and
+tokens per minute by model, model latency (p50, p95) and tool latency (p95), agent runs by outcome, and how many
+model and tool calls each run makes (a climbing line is an agent looping).
+
+![The agent-otel dashboard in Grafana 13.3, fed by the demo agents for 20 minutes](docs/grafana.png)
+
+```sh
+./prometheus --web.enable-otlp-receiver
+python examples/feed_prometheus.py --seconds 900     # one process, metrics every 5 s, varied pretend traffic
+# Grafana with the files in examples/grafana/provisioning (a data source with uid "prometheus", the dashboard):
+PROMETHEUS_URL=http://localhost:9090 AGENT_OTEL_DASHBOARDS=$PWD/examples/grafana \
+  GF_PATHS_PROVISIONING=$PWD/examples/grafana/provisioning ./bin/grafana server
+python examples/grafana/check_dashboard.py --grafana http://localhost:3000   # every panel returns numbers
+```
+
+CI provisions the dashboard into a real Grafana 13.3, feeds it for 90 seconds and checks it the same way: the
+dashboard Grafana loaded has the file's panels, and every panel query, sent through Grafana's own query API,
+returns finite numbers (a p95 over empty buckets is NaN, a blank panel). Set the data source's `timeInterval` to
+your export interval (the OpenTelemetry SDK sends every 60 s by default), so `$__rate_interval` windows hold
+enough samples.
+
 ### Alerts
 
 [examples/prometheus/alerts.yml](examples/prometheus/alerts.yml) has five starting rules: an agent whose runs fail

@@ -1,0 +1,8 @@
+# Loads agent-otel.json. AGENT_OTEL_DASHBOARDS is the folder holding it (examples/grafana in this repo).
+apiVersion: 1
+providers:
+  - name: agent-otel
+    type: file
+    allowUiUpdates: false
+    options:
+      path: ${AGENT_OTEL_DASHBOARDS}
