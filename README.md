@@ -138,7 +138,8 @@ cost                               0.0005215       0.0005215
 model calls, per run sums                  4               4
 ```
 
-CI runs it on every push. Prometheus stores the names as `gen_ai_client_inference_usage_input_tokens_total`,
+CI runs it on every push, and the TypeScript side's own check (`node js/examples/otlp-prometheus.ts`) after it.
+Prometheus stores the names as `gen_ai_client_inference_usage_input_tokens_total`,
 `gen_ai_execute_tool_duration_seconds_bucket` and so on, so the two questions above become:
 
 ```promql
@@ -220,6 +221,12 @@ await agent("support", async () => {
 });
 ```
 
+Metrics work the same way: `configure({ meterProvider })` records the metrics in the table above, from the same
+numbers and clock readings as the spans (9 tests, the same cases as the Python ones). On a desktop (Node 22),
+metrics add about 1 us to a tool call and 3.3 us to a model call (`node js/bench/overhead.ts`); with metrics off,
+tool and model spans cost what they did before (2.4 to 3.0 us and 2.6 to 2.9 us, in A/B runs against the
+previous release).
+
 Run totals are kept in an `AsyncLocalStorage`, so two agents running at once never mix their counts (tested). With
 no OpenTelemetry context manager registered, spans still nest under their agent; with one (the Node SDK registers
 it), they join the application's own traces. It is not on npm (that needs an account): build it from the clone with
@@ -236,7 +243,6 @@ integers, the failed carrier call marked with its error type.
 - **Threads need their context.** Totals and the current span follow asyncio tasks, but not new threads. In a
   thread pool, submit with `contextvars.copy_context().run`.
 - **The GenAI conventions are still in development.** Names may change again; agent-otel will follow.
-- **Metrics are Python only for now.** The TypeScript side makes the same spans but no metrics yet.
 - **Token modality is always `unknown`.** `record()` takes totals, not a text, image and audio split.
 - **Content is off by default.** With `capture_content=True`, tool arguments and results are stored (capped at
   4,000 characters) and may contain personal data. A big result is cut while it is encoded, not after: a tool
@@ -251,7 +257,7 @@ pip install -e '.[test]'
 pytest -q               # 43 tests, about 1 s
 cd js && npm ci
 npm run typecheck       # src, tests, bench and examples
-npm test                # 7 tests; with AGENT_OTEL_PYTHON=../.venv/bin/python the Python CLI reads their output too
+npm test                # 16 tests; with AGENT_OTEL_PYTHON=../.venv/bin/python the Python CLI reads their output too
 ```
 
 Tests use the SDK's in-memory exporters and a fake model. CI runs them on Python 3.10, 3.12 and 3.13, and on 3.10

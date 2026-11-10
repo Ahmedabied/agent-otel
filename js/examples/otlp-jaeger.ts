@@ -13,59 +13,12 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import { BatchSpanProcessor, TracerProvider } from "@opentelemetry/sdk-trace";
-import { agent, configure, modelCall, tool } from "../src/index.ts";
+import { configure } from "../src/index.ts";
+import { handle, setTrackCalls } from "./demo-agent.ts";
 
 const OTLP = process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ?? "http://localhost:4318/v1/traces";
 const JAEGER = process.env.JAEGER_QUERY_URL ?? "http://localhost:16686";
 const SERVICE = "demo-support-ts";
-
-// ---- the pretend agent: a scripted "model" that sleeps a little per token ----------------------------------------
-
-class TimeoutError extends Error {
-  override name = "TimeoutError";
-}
-
-const words = (s: string) => s.split(/\s+/).filter(Boolean).length;
-
-async function ask(model: string, msPerToken: number, prompt: string, reply: string): Promise<string> {
-  return modelCall(model, async (m) => {
-    const inputTokens = Math.floor(words(prompt) * 1.3) + 400; // plus a system prompt
-    const outputTokens = Math.floor(words(reply) * 1.3);
-    await sleep(20 + outputTokens * msPerToken);
-    m.record({ inputTokens, outputTokens, finishReasons: ["stop"] });
-    return reply;
-  }, { provider: "example", maxTokens: 512 });
-}
-
-let trackCalls = 0;
-const findOrder = tool("find_order", async (_email: string) => {
-  await sleep(35);
-  return { order: "A-1042", status: "in transit", carrier: "parcel co" };
-});
-const trackParcel = tool("track_parcel", async (_order: string) => {
-  await sleep(90);
-  trackCalls += 1;
-  if (trackCalls === 1) throw new TimeoutError("carrier API did not answer in 80 ms");
-  return { eta: "Thursday" };
-});
-
-function handle(question: string, conversation: string): Promise<string> {
-  return agent("support-agent", async () => {
-    await ask("local-qwen-7b", 4, question, "intent: order status. need email lookup then tracking");
-    const order = await findOrder("someone@example.org");
-    let eta: { eta: string } | undefined;
-    for (let attempt = 0; attempt < 2 && !eta; attempt++) {
-      try {
-        eta = await trackParcel(order.order);
-      } catch (e) {
-        if (!(e instanceof TimeoutError) || attempt === 1) throw e;
-      }
-    }
-    return ask("example-hosted-small", 1.5, `${question} ${order.order} ${eta?.eta}`,
-      "Your order A-1042 is on its way with Parcel Co and should arrive on Thursday. " +
-      "I will send you the tracking link by email as well.");
-  }, { conversationId: conversation });
-}
 
 // ---- export, read back, check -------------------------------------------------------------------------------------
 
@@ -77,9 +30,9 @@ async function exportRuns(): Promise<string> {
   });
   const prices = JSON.parse(readFileSync(new URL("../../examples/prices.example.json", import.meta.url), "utf8"));
   configure({ tracerProvider: provider, prices });
-  trackCalls = 0;
+  setTrackCalls(0);
   await handle("where is my order? it was meant to come yesterday", "conv-1");
-  trackCalls = 1; // the second run has no carrier timeout
+  setTrackCalls(1); // the second run has no carrier timeout
   await handle("has my parcel shipped yet", "conv-2");
   await provider.shutdown(); // flushes the batch
   return runId;

@@ -118,5 +118,13 @@ jobs:
           nohup ./prometheus --config.file=prometheus.yml --web.enable-otlp-receiver > /tmp/prom/prometheus.log 2>&1 &
           for i in $(seq 1 30); do curl -sf http://localhost:9090/-/ready > /dev/null && break; sleep 1; done
       - run: python examples/otlp_prometheus.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: The TypeScript side, same checks
+        working-directory: js
+        run: |
+          npm ci
+          node examples/otlp-prometheus.ts
       - if: failure()
         run: cat /tmp/prom/prometheus.log

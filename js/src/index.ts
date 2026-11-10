@@ -4,8 +4,10 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { appendFileSync } from "node:fs";
 import { inspect } from "node:util";
 import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
-import type { Attributes, Context, Span, TracerProvider } from "@opentelemetry/api";
+import type { Attributes, Context, HrTime, MeterProvider, Span, TracerProvider } from "@opentelemetry/api";
 import * as C from "./conventions.ts";
+import { Instruments } from "./metrics.ts";
+import type { CallUsage } from "./metrics.ts";
 import { Prices } from "./prices.ts";
 import type { PriceTable } from "./prices.ts";
 
@@ -13,32 +15,36 @@ export { C, Prices };
 export { PriceError } from "./prices.ts";
 export type { Price, PriceTable } from "./prices.ts";
 
-export const VERSION = "0.1.0";
+export const VERSION = "0.2.0";
 
 interface Config {
   provider: TracerProvider | null;
   prices: Prices | null;
   captureContent: boolean;
   maxContentChars: number;
+  instruments: Instruments | null;
 }
 
-const config: Config = { provider: null, prices: null, captureContent: false, maxContentChars: 4000 };
+const config: Config = { provider: null, prices: null, captureContent: false, maxContentChars: 4000, instruments: null };
 
 /**
  * Choose where spans go, the price table, and whether tool arguments and results are recorded (off by default:
  * they may hold personal data). Without a tracerProvider, the global one is used, so these spans join whatever
- * tracing the application already has.
+ * tracing the application already has. Metrics are off unless a meterProvider is given (pass
+ * metrics.getMeterProvider() from @opentelemetry/api to use the global one).
  */
 export function configure(opts: {
   tracerProvider?: TracerProvider | null;
   prices?: Prices | PriceTable | null;
   captureContent?: boolean;
   maxContentChars?: number;
+  meterProvider?: MeterProvider | null;
 } = {}): void {
   config.provider = opts.tracerProvider ?? null;
   config.prices = opts.prices == null ? null : opts.prices instanceof Prices ? opts.prices : new Prices(opts.prices);
   config.captureContent = opts.captureContent ?? false;
   config.maxContentChars = opts.maxContentChars ?? 4000;
+  config.instruments = opts.meterProvider ? new Instruments(opts.meterProvider, VERSION, config.prices?.currency ?? null) : null;
 }
 
 const tracer = () => (config.provider ?? trace.getTracerProvider()).getTracer("agent-otel", VERSION);
@@ -51,6 +57,43 @@ class Totals {
   unpricedCalls = 0;
   modelCalls = 0;
   toolCalls = 0;
+  // Made by this run itself, not by a run nested in it (for metrics).
+  ownModelCalls = 0;
+  ownToolCalls = 0;
+  nestedRuns = 0;
+  readonly name: string;
+
+  constructor(name = "") {
+    this.name = name;
+  }
+}
+
+function count(counted: Totals[], model: boolean): void {
+  const inner = counted[counted.length - 1];
+  for (const run of counted) {
+    if (model) run.modelCalls += 1;
+    else run.toolCalls += 1;
+  }
+  if (inner && model) inner.ownModelCalls += 1;
+  else if (inner) inner.ownToolCalls += 1;
+}
+
+// One clock for a span and its metric, so the two durations are equal to the nanosecond.
+function nowHr(): HrTime {
+  const ms = performance.timeOrigin + performance.now();
+  const sec = Math.floor(ms / 1000);
+  const ns = Math.round((ms - sec * 1000) * 1e6);
+  return ns >= 1e9 ? [sec + 1, ns - 1e9] : [sec, ns];
+}
+const secondsBetween = (a: HrTime, b: HrTime) => ((b[0] - a[0]) * 1e9 + (b[1] - a[1])) / 1e9;
+
+/** Metrics must never break the call they describe. */
+function metric(record: () => void): void {
+  try {
+    record();
+  } catch {
+    // dropped on purpose
+  }
 }
 
 // Our own context: the runs a call counts toward, and our innermost span. The span is the parent of the next one
@@ -68,26 +111,35 @@ function parentContext(): Context {
   return ours ? trace.setSpan(active, ours) : active;
 }
 
+type After = (span: Span, error: string | undefined, seconds: number, ins: Instruments | null) => void;
+
 async function inSpan<T>(name: string, kind: SpanKind, attributes: Attributes, runs: Totals[],
-                         fn: (span: Span) => T | Promise<T>, after?: (span: Span) => void): Promise<T> {
+                         fn: (span: Span) => T | Promise<T>, after?: After): Promise<T> {
   const parent = parentContext();
-  const span = tracer().startSpan(name, { kind, attributes }, parent);
+  const ins = config.instruments;
+  const start = ins ? nowHr() : undefined;
+  const span = tracer().startSpan(name, start ? { kind, attributes, startTime: start } : { kind, attributes }, parent);
+  let error: string | undefined;
   try {
     return await context.with(trace.setSpan(parent, span), () => scope.run({ runs, span }, () => fn(span)));
   } catch (e) {
     fail(span, e);
+    error = errorType(e);
     throw e;
   } finally {
-    after?.(span);
-    span.end();
+    const end = start ? nowHr() : undefined;
+    after?.(span, error, start && end ? secondsBetween(start, end) : 0, ins);
+    span.end(end);
   }
 }
+
+const errorType = (e: unknown) => (e as { constructor?: { name?: string } })?.constructor?.name ?? typeof e;
 
 function fail(span: Span, e: unknown): void {
   const err = e instanceof Error ? e : new Error(String(e));
   span.recordException(err);
   span.setStatus({ code: SpanStatusCode.ERROR, message: err.message.slice(0, 200) });
-  span.setAttribute(C.ERROR_TYPE, (e as { constructor?: { name?: string } })?.constructor?.name ?? typeof e);
+  span.setAttribute(C.ERROR_TYPE, errorType(e));
 }
 
 const runs = () => scope.getStore()?.runs ?? [];
@@ -199,51 +251,76 @@ export class ModelCall {
   cost: number | null = null;
   readonly span: Span;
   readonly model: string;
-  private readonly counted: Totals[];
+  /** What record() was told, merged over calls; the span shows the same numbers. Undefined until record(). */
+  usage: CallUsage | undefined;
+  responseModel: string | undefined;
 
-  constructor(span: Span, model: string, counted: Totals[]) {
+  constructor(span: Span, model: string) {
     this.span = span;
     this.model = model;
-    this.counted = counted;
   }
 
-  /** Call once the model has answered, with the usage numbers from its response. */
-  record(u: Usage): void {
+  /** Call once the model has answered, with the usage numbers from its response. Calling it again (a stream that
+   *  reports usage in parts) updates the numbers it is given; totals and metrics take the final ones at the end. */
+  record(r: Usage): void {
     const s = this.span;
-    const read = Math.trunc(u.cacheReadInputTokens ?? 0);
-    const write = Math.trunc(u.cacheWriteInputTokens ?? 0);
-    let input = u.inputTokens === undefined ? undefined : Math.trunc(u.inputTokens);
-    if (input !== undefined && read + write > input) {
-      process.emitWarning(`agent-otel: cache tokens (${read} read + ${write} written) exceed inputTokens (${input}), `
-        + "so inputTokens was taken to exclude them and they were added; pass inputTokens with the cached tokens included");
-      input += read + write;
+    const u = (this.usage ??= { inputTokens: 0, outputTokens: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 });
+    if (r.cacheReadInputTokens !== undefined) {
+      u.cacheRead = Math.trunc(r.cacheReadInputTokens);
+      s.setAttribute(C.USAGE_CACHE_READ_INPUT_TOKENS, u.cacheRead);
     }
-    if (input !== undefined) s.setAttribute(C.USAGE_INPUT_TOKENS, input);
-    if (u.outputTokens !== undefined) s.setAttribute(C.USAGE_OUTPUT_TOKENS, Math.trunc(u.outputTokens));
-    if (u.cacheReadInputTokens !== undefined) s.setAttribute(C.USAGE_CACHE_READ_INPUT_TOKENS, read);
-    if (u.cacheWriteInputTokens !== undefined) s.setAttribute(C.USAGE_CACHE_WRITE_INPUT_TOKENS, write);
-    if (u.reasoningOutputTokens !== undefined) {
-      s.setAttribute(C.USAGE_REASONING_OUTPUT_TOKENS, Math.trunc(u.reasoningOutputTokens));
+    if (r.cacheWriteInputTokens !== undefined) {
+      u.cacheWrite = Math.trunc(r.cacheWriteInputTokens);
+      s.setAttribute(C.USAGE_CACHE_WRITE_INPUT_TOKENS, u.cacheWrite);
     }
-    if (u.responseModel) s.setAttribute(C.RESPONSE_MODEL, u.responseModel);
-    if (u.finishReasons?.length) s.setAttribute(C.RESPONSE_FINISH_REASONS, u.finishReasons.map(String));
-    if (u.responseId) s.setAttribute(C.RESPONSE_ID, u.responseId);
+    const read = u.cacheRead;
+    const write = u.cacheWrite;
+    if (r.inputTokens !== undefined) {
+      let input = Math.trunc(r.inputTokens);
+      if (read + write > input) {
+        process.emitWarning(`agent-otel: cache tokens (${read} read + ${write} written) exceed inputTokens (${input}), `
+          + "so inputTokens was taken to exclude them and they were added; pass inputTokens with the cached tokens included");
+        input += read + write;
+      }
+      u.inputTokens = input;
+      s.setAttribute(C.USAGE_INPUT_TOKENS, input);
+    }
+    if (r.outputTokens !== undefined) {
+      u.outputTokens = Math.trunc(r.outputTokens);
+      s.setAttribute(C.USAGE_OUTPUT_TOKENS, u.outputTokens);
+    }
+    if (r.reasoningOutputTokens !== undefined) {
+      u.reasoning = Math.trunc(r.reasoningOutputTokens);
+      s.setAttribute(C.USAGE_REASONING_OUTPUT_TOKENS, u.reasoning);
+    }
+    if (r.responseModel) {
+      this.responseModel = r.responseModel;
+      s.setAttribute(C.RESPONSE_MODEL, r.responseModel);
+    }
+    if (r.finishReasons?.length) s.setAttribute(C.RESPONSE_FINISH_REASONS, r.finishReasons.map(String));
+    if (r.responseId) s.setAttribute(C.RESPONSE_ID, r.responseId);
     const prices = config.prices;
-    const output = Math.trunc(u.outputTokens ?? 0);
     if (prices) {
-      this.cost = prices.cost(u.responseModel || this.model, input ?? 0, output, read, write);
+      this.cost = prices.cost(this.responseModel || this.model, u.inputTokens, u.outputTokens, read, write);
       if (this.cost !== null) {
         s.setAttribute(C.COST, this.cost);
         s.setAttribute(C.COST_CURRENCY, prices.currency);
       }
     }
-    for (const run of this.counted) {
-      run.inputTokens += input ?? 0;
-      run.outputTokens += output;
+  }
+
+  /** @internal Adds the final numbers to the runs this call counts toward, once, when the call ends. */
+  addTo(counted: Totals[]): void {
+    const u = this.usage;
+    if (!u) return;
+    const pricedTable = config.prices !== null;
+    for (const run of counted) {
+      run.inputTokens += u.inputTokens;
+      run.outputTokens += u.outputTokens;
       if (this.cost !== null) {
         run.cost += this.cost;
         run.priced = true;
-      } else if (prices) run.unpricedCalls += 1;
+      } else if (pricedTable) run.unpricedCalls += 1;
     }
   }
 }
@@ -252,14 +329,21 @@ export class ModelCall {
 export function modelCall<T>(model: string, fn: (call: ModelCall) => T | Promise<T>,
                              opts: { provider?: string; operation?: string; maxTokens?: number; temperature?: number } = {}): Promise<T> {
   const operation = opts.operation ?? C.CHAT;
-  const attrs: Attributes = {
-    [C.OPERATION_NAME]: operation, [C.PROVIDER_NAME]: opts.provider ?? "unknown", [C.REQUEST_MODEL]: model,
-  };
+  const provider = opts.provider ?? "unknown";
+  const attrs: Attributes = { [C.OPERATION_NAME]: operation, [C.PROVIDER_NAME]: provider, [C.REQUEST_MODEL]: model };
   if (opts.maxTokens !== undefined) attrs[C.REQUEST_MAX_TOKENS] = opts.maxTokens;
   if (opts.temperature !== undefined) attrs[C.REQUEST_TEMPERATURE] = opts.temperature;
   const counted = runs();
-  for (const run of counted) run.modelCalls += 1;
-  return inSpan(`${operation} ${model}`, SpanKind.CLIENT, attrs, counted, (span) => fn(new ModelCall(span, model, counted)));
+  count(counted, true);
+  let call: ModelCall | undefined;
+  return inSpan(`${operation} ${model}`, SpanKind.CLIENT, attrs, counted, (span) => fn(call = new ModelCall(span, model)),
+    (_span, error, seconds, ins) => {
+      if (!call) return;
+      call.addTo(counted);
+      const c = call;
+      if (ins) metric(() => ins.model(operation, provider, model, c.responseModel, error, seconds, c.usage, c.cost,
+        config.prices !== null));
+    });
 }
 
 // ---- tool calls ----------------------------------------------------------------------------------------------------
@@ -287,8 +371,12 @@ export function toolCall<T>(name: string, fn: (call: ToolCall) => T | Promise<T>
   if (opts.callId) attrs[C.TOOL_CALL_ID] = opts.callId;
   if (opts.arguments !== undefined && config.captureContent) attrs[C.TOOL_CALL_ARGUMENTS] = content(opts.arguments);
   const counted = runs();
-  for (const run of counted) run.toolCalls += 1;
-  return inSpan(`${C.EXECUTE_TOOL} ${name}`, SpanKind.INTERNAL, attrs, counted, (span) => fn(new ToolCall(span)));
+  count(counted, false);
+  const toolType = opts.toolType ?? "function";
+  return inSpan(`${C.EXECUTE_TOOL} ${name}`, SpanKind.INTERNAL, attrs, counted, (span) => fn(new ToolCall(span)),
+    (_span, error, seconds, ins) => {
+      if (ins) metric(() => ins.tool(name, toolType, counted[counted.length - 1]?.name, error, seconds));
+    });
 }
 
 /** Wrap a function so every call is a tool span. The wrapper is always async. */
@@ -306,9 +394,12 @@ export function agent<T>(name: string, fn: (span: Span) => T | Promise<T>,
   const attrs: Attributes = { [C.OPERATION_NAME]: C.INVOKE_AGENT, [C.AGENT_NAME]: name };
   if (opts.conversationId) attrs[C.CONVERSATION_ID] = opts.conversationId;
   if (opts.agentId) attrs[C.AGENT_ID] = opts.agentId;
-  const totals = new Totals();
+  const totals = new Totals(name);
   const prices = config.prices;
-  return inSpan(`${C.INVOKE_AGENT} ${name}`, SpanKind.INTERNAL, attrs, [...runs(), totals], fn, (span) => {
+  const outer = runs();
+  const parentRun = outer[outer.length - 1];
+  if (parentRun) parentRun.nestedRuns += 1;
+  return inSpan(`${C.INVOKE_AGENT} ${name}`, SpanKind.INTERNAL, attrs, [...outer, totals], fn, (span, error, seconds, ins) => {
     span.setAttribute(C.TOTAL_INPUT_TOKENS, totals.inputTokens);
     span.setAttribute(C.TOTAL_OUTPUT_TOKENS, totals.outputTokens);
     span.setAttribute(C.TOTAL_MODEL_CALLS, totals.modelCalls);
@@ -321,6 +412,7 @@ export function agent<T>(name: string, fn: (span: Span) => T | Promise<T>,
         span.setAttribute(C.COST_CURRENCY, prices.currency);
       }
     }
+    if (ins) metric(() => ins.agent(name, error, seconds, totals.ownModelCalls, totals.ownToolCalls, totals.nestedRuns > 0));
   });
 }
 
