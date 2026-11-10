@@ -1,7 +1,7 @@
 {
   "name": "agent-otel",
   "version": "0.2.0",
-  "description": "Traces, token cost and latency for agent model and tool calls: OpenTelemetry GenAI spans, TypeScript side",
+  "description": "Traces, metrics, token cost and latency for agent model and tool calls: OpenTelemetry GenAI spans and metrics, TypeScript side",
   "license": "MIT",
   "type": "module",
   "main": "dist/src/index.js",

@@ -5,13 +5,13 @@ build-backend = "hatchling.build"
 [project]
 name = "agent-otel"
 version = "0.2.0"
-description = "Traces, token cost and latency for AI agent tool and model calls, as OpenTelemetry spans with the GenAI conventions, plus a local HTML viewer."
+description = "Traces, metrics, token cost and latency for AI agent tool and model calls, as OpenTelemetry spans and metrics with the GenAI conventions, plus a local HTML viewer."
 readme = "README.md"
 license = "MIT"
 authors = [{ name = "Ahmed Abied" }]
 requires-python = ">=3.10"
 dependencies = ["opentelemetry-api>=1.30", "opentelemetry-sdk>=1.30"]
-keywords = ["opentelemetry", "tracing", "ai-agents", "llm", "observability", "genai"]
+keywords = ["opentelemetry", "tracing", "metrics", "prometheus", "ai-agents", "llm", "observability", "genai"]
 
 [project.optional-dependencies]
 test = ["pytest>=8"]

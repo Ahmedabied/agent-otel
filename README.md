@@ -158,7 +158,7 @@ the last hour, model calls per minute, the share of agent runs failing, unpriced
 tokens per minute by model, model latency (p50, p95) and tool latency (p95), agent runs by outcome, and how many
 model and tool calls each run makes (a climbing line is an agent looping).
 
-![The agent-otel dashboard in Grafana 13.3, fed by the demo agents for 20 minutes](docs/grafana.png)
+![The agent-otel dashboard in Grafana 13.3, fed by the demo agents for 15 minutes](docs/grafana.png)
 
 ```sh
 ./prometheus --web.enable-otlp-receiver
