@@ -98,13 +98,13 @@ def test_metrics_never_carry_ids_or_content(tel):
     with agent("support", conversation_id="conv-secret", agent_id="agent-secret"):
         with model_call("gpt-x", provider="openai") as m:
             m.record(input_tokens=10, output_tokens=5, response_id="resp-secret", finish_reasons=["stop"])
-        with tool_call("lookup", call_id="call-secret", arguments={"email": "a@example.com"}) as c:
+        with tool_call("lookup", call_id="call-secret", arguments={"email": "secret-email"}) as c:
             c.result({"order": "secret-order"})
     seen = set()
     for metric in t.collect().values():
         for p in metric.data.data_points:
             seen |= set(p.attributes)
-            assert not any("secret" in str(v) or "example.com" in str(v) for v in p.attributes.values())
+            assert not any("secret" in str(v) for v in p.attributes.values())  # every id and value above has it
     assert seen <= ALLOWED, seen - ALLOWED
 
 
