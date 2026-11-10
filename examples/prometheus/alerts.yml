@@ -1,6 +1,11 @@
 # Alert rules for agent-otel's metrics, as Prometheus stores them from OTLP. Tested with
 # `promtool test rules alerts.test.yml`, and every metric name here is checked against a real Prometheus in CI.
 # The thresholds are starting points: set them from your own traffic. Load with `rule_files: [alerts.yml]`.
+#
+# One thing to know about counters sent over OTLP: a series starts when it is first counted, so the first sample
+# Prometheus sees is already above zero, and rate() and increase() cannot see what it counted before that sample.
+# The failure rules below miss a newly failing agent's or model's first export interval (60 s by default); the
+# spend and unpriced rules are written so they do not.
 groups:
   - name: agent-otel
     rules:
@@ -42,16 +47,25 @@ groups:
           summary: "{{ $labels.gen_ai_tool_name }}: p95 is {{ $value | humanizeDuration }}"
 
       - alert: SpendAboveBudget
-        # More than 5 (in your price table's currency) spent in the last hour. Set your own budget.
-        expr: sum(increase(agent_otel_cost_total[1h])) > 5
+        # More than 5 (in your price table's currency) spent in the last hour. Set your own budget. A series that
+        # began inside the hour (a new process, a model's first call) counts its whole value: increase() would
+        # leave out what it counted before its first sample, and all of a short job's spend.
+        expr: |
+          sum(
+              (increase(agent_otel_cost_total[1h]) and agent_otel_cost_total offset 1h)
+            or
+              max_over_time(agent_otel_cost_total[1h])
+          ) > 5
         labels:
           severity: page
         annotations:
           summary: "{{ $value | printf \"%.2f\" }} spent on model calls in the last hour"
 
       - alert: ModelCallsUnpriced
-        # Calls to a model that is not in the price table: every cost total leaves them out.
-        expr: sum by (gen_ai_request_model) (increase(agent_otel_unpriced_calls_total[1h])) > 0
+        # Calls to a model that is not in the price table: every cost total leaves them out. The counter only
+        # exists once a call went unpriced, so its presence is the signal (increase() would read a counter born
+        # at 1 as no change). It clears once the processes restart with the model priced.
+        expr: sum by (gen_ai_request_model) (agent_otel_unpriced_calls_total) > 0
         labels:
           severity: ticket
         annotations:

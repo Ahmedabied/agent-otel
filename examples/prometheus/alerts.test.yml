@@ -84,11 +84,28 @@ tests:
           - exp_labels: {severity: page}
             exp_annotations: {summary: "12.00 spent on model calls in the last hour"}
 
-  # One unpriced call is enough for a ticket naming the model.
+  # A short job that starts 30 minutes in and spends 7: as a new series its first sample is already 4, and
+  # increase() alone would count only the 3 after it.
+  - interval: 1m
+    input_series:
+      - series: 'agent_otel_cost_total{gen_ai_request_model="large", agent_otel_cost_currency="USD", instance="job-1"}'
+        values: '_x30 4+0.1x30'
+    alert_rule_test:
+      - eval_time: 29m
+        alertname: SpendAboveBudget
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: SpendAboveBudget
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations: {summary: "7.00 spent on model calls in the last hour"}
+
+  # One unpriced call is enough for a ticket naming the model, also when the counter is born at 1, as it is
+  # over OTLP (absent, then 1).
   - interval: 1m
     input_series:
       - series: 'agent_otel_unpriced_calls_total{gen_ai_request_model="new-model", gen_ai_provider_name="example"}'
-        values: '0x5 1x55'
+        values: '_x5 1x55'
     alert_rule_test:
       - eval_time: 3m
         alertname: ModelCallsUnpriced

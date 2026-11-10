@@ -138,6 +138,8 @@ cost                               0.0005215       0.0005215
 unpriced model calls                       1               1
 model calls, per run sums                  5               5
 names in alerts.yml stored                 5               5
+ModelCallsUnpriced fires                   1               1
+SpendAboveBudget's hour            0.0005215       0.0005215
 ```
 
 CI runs it on every push, and the TypeScript side's own check (`node js/examples/otlp-prometheus.ts`) after it.
@@ -158,8 +160,17 @@ leaves them out until you add it). Each threshold is a placeholder for your own 
 
 They have unit tests ([alerts.test.yml](examples/prometheus/alerts.test.yml), `promtool test rules`): each rule
 fires on the series it is written for, stays quiet below its threshold and inside its `for` window, and names the
-right agent, model or tool. Tests written on made-up series can pass with a misspelt metric name, so the
-Prometheus check above also confirms that every name the rules use is one Prometheus really stored. Both run in CI.
+right agent, model or tool. Tests on made-up series can pass where real data does not, so the Prometheus check
+above also confirms that every name the rules use was really stored, and runs the spend and unpriced rules on the
+real run: the unpriced rule names the model the spans left unpriced, and the spend rule's hour equals the spans'
+cost. Both run in CI.
+
+That check caught a mistake in the first version of these rules. A counter sent over OTLP starts when it is first
+counted, so Prometheus's first sample of it is already above zero, and `increase()` cannot see what came before
+it: the unpriced rule never fired for a model's first unpriced calls, and the spend rule left out the whole spend
+of a short job. Both are now written around that (see the comments in the file), with tests where the series is
+absent and then appears above zero. The two failure-rate rules still miss a newly failing agent's or model's first
+export interval (60 s by default).
 
 ## What each span carries
 

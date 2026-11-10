@@ -84,6 +84,39 @@ def stored_names(run_id: str, timeout_s: float = 20.0) -> list[str]:
         time.sleep(0.5)
 
 
+# A metric name as Prometheus stores ours: counters end in _total, histograms in _bucket, _count and _sum.
+# Label names (gen_ai_request_model and the like) have none of these endings.
+STORED_NAME = r"\b((?:gen_ai|agent_otel)_[a-z_]+?_(?:total|bucket|count|sum))\b"
+
+
+def rule_exprs(text: str) -> dict[str, str]:
+    """alert name -> expression, read from the rules file without a YAML library."""
+    rules, lines = {}, text.splitlines()
+    for i, line in enumerate(lines):
+        m = re.match(r"\s*- alert: (\S+)", line)
+        if not m:
+            continue
+        for j in range(i + 1, len(lines)):
+            e = re.match(r"(\s*)expr: ?(.*)", lines[j])
+            if e:
+                if e[2].strip() != "|":
+                    rules[m[1]] = e[2].strip()
+                else:
+                    block = []
+                    for k in range(j + 1, len(lines)):
+                        if lines[k].strip() and len(lines[k]) - len(lines[k].lstrip()) <= len(e[1]):
+                            break
+                        block.append(lines[k].strip())
+                    rules[m[1]] = " ".join(b for b in block if b)
+                break
+    return rules
+
+
+def scoped(expr: str, run_id: str) -> str:
+    """The expression with every metric selector limited to this run's series."""
+    return re.sub(STORED_NAME + r"(\{)?", lambda m: f'{m[1]}{{instance="{run_id}"' + ("," if m[2] else "}"), expr)
+
+
 def check(run_id: str, spans: list, names: list[str]) -> tuple[list[str], list[tuple]]:
     sel = f'instance="{run_id}"'
     problems, rows = [], []
@@ -138,13 +171,31 @@ def check(run_id: str, spans: list, names: list[str]) -> tuple[list[str], list[t
         want = {repr(b) for b in C.SECONDS_BUCKETS} | {"+Inf"}
         if not want <= les:
             problems.append(f"{bucket}: bucket bounds {sorted(les)} miss {sorted(want - les)}")
-    # The alert rules are unit tested on series written by hand; this makes sure those names are the real ones.
-    in_rules = set(re.findall(r"\b((?:gen_ai|agent_otel)_[a-z_]+)(?=[{\[])", ALERTS.read_text()))
+    # The alert rules are unit tested on series written by hand. These make sure they also work on real ones:
+    # every name they use was stored, and the two rules this run can trigger give the spans' answer.
+    text = ALERTS.read_text()
+    in_rules = set(re.findall(STORED_NAME, text))
     if not in_rules:
         problems.append(f"{ALERTS.name}: no metric names found")
     for name in sorted(in_rules - set(names)):
         problems.append(f"{ALERTS.name} uses {name}, which Prometheus did not store")
     rows.append((f"names in {ALERTS.name} stored", "", len(in_rules), len(in_rules & set(names))))
+    rules = rule_exprs(text)
+    unpriced = {s.attributes[C.REQUEST_MODEL] for s in chats if C.COST not in s.attributes}
+    if "ModelCallsUnpriced" not in rules or "SpendAboveBudget" not in rules:
+        problems.append(f"{ALERTS.name}: ModelCallsUnpriced or SpendAboveBudget is missing")
+        return problems, rows
+    fired = {r["metric"].get("gen_ai_request_model") for r in
+             _get("/api/v1/query", query=scoped(rules["ModelCallsUnpriced"], run_id))["result"]}
+    rows.append(("ModelCallsUnpriced fires", "", len(unpriced), len(fired & unpriced)))
+    if fired != unpriced:
+        problems.append(f"ModelCallsUnpriced fired for {sorted(fired)}, the spans have unpriced {sorted(unpriced)}")
+    spend_expr = re.sub(r"\)\s*>\s*[0-9.]+\s*$", ")", rules["SpendAboveBudget"])  # the hour's spend, no threshold
+    spent = total(scoped(spend_expr, run_id))
+    cost = sum(s.attributes.get(C.TOTAL_COST, 0.0) for s in agents)
+    rows.append(("SpendAboveBudget's hour", "", cost, spent))
+    if abs(spent - cost) > 1e-9 * max(1.0, cost):
+        problems.append(f"SpendAboveBudget counts {spent} for this run, the spans say {cost}")
     return problems, rows
 
 
